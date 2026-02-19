@@ -1,0 +1,103 @@
+name: Build Desktop (Tauri)
+
+on:
+    push:
+        tags:
+            - 'v*'
+
+permissions:
+    contents: write
+
+jobs:
+    create-release:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        outputs:
+            release-id: ${{ steps.create-release.outputs.id }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Create draft GitHub Release
+              id: create-release
+              uses: softprops/action-gh-release@v2
+              with:
+                  draft: true
+                  generate_release_notes: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    build-tauri:
+        needs: create-release
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: macos
+                      runner: macos-latest
+                      rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+                      tauri-args: --target universal-apple-darwin
+                    - platform: windows
+                      runner: windows-latest
+                      rust-targets: x86_64-pc-windows-msvc
+                      tauri-args: ''
+                    - platform: linux
+                      runner: ubuntu-22.04
+                      rust-targets: x86_64-unknown-linux-gnu
+                      tauri-args: ''
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 60
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+                  cache: yarn
+
+            - name: Setup Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.rust-targets }}
+
+            - name: Cache Rust build artifacts
+              uses: swatinem/rust-cache@v2
+              with:
+                  workspaces: packages/happy-app/src-tauri -> target
+
+            - name: Install Linux system dependencies
+              if: matrix.platform == 'linux'
+              run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+            - name: Install Node dependencies
+              env:
+                  SKIP_HAPPY_WIRE_BUILD: '1'
+              run: yarn install --frozen-lockfile --ignore-engines
+
+            - name: Build happy-wire
+              run: yarn workspace @slopus/happy-wire build
+
+            - name: Build and upload Tauri app
+              uses: tauri-apps/tauri-action@v0
+              with:
+                  releaseId: ${{ needs.create-release.outputs.release-id }}
+                  projectPath: packages/happy-app
+                  tauriScript: yarn tauri
+                  args: ${{ matrix.tauri-args }}
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Write step summary
+              shell: bash
+              run: |
+                  echo "## Desktop Build Complete (${{ matrix.platform }})" >> "$GITHUB_STEP_SUMMARY"
+                  echo "" >> "$GITHUB_STEP_SUMMARY"
+                  echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+                  echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+                  echo "| Platform | \`${{ matrix.platform }}\` |" >> "$GITHUB_STEP_SUMMARY"
+                  echo "| Runner | \`${{ matrix.runner }}\` |" >> "$GITHUB_STEP_SUMMARY"
+                  echo "| Tag | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+                  echo "" >> "$GITHUB_STEP_SUMMARY"
+                  echo "Artifacts have been uploaded to the draft GitHub Release." >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,82 @@
+name: Build Server (Docker → ECR)
+
+on:
+    push:
+        tags:
+            - 'v*'
+
+permissions:
+    contents: read
+
+jobs:
+    build-and-push:
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        steps:
+            - name: Validate required secrets
+              env:
+                  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  AWS_REGION: ${{ secrets.AWS_REGION }}
+                  AWS_ECR_REPOSITORY: ${{ secrets.AWS_ECR_REPOSITORY }}
+              run: |
+                  missing=()
+                  [ -z "$AWS_ACCESS_KEY_ID" ] && missing+=("AWS_ACCESS_KEY_ID")
+                  [ -z "$AWS_SECRET_ACCESS_KEY" ] && missing+=("AWS_SECRET_ACCESS_KEY")
+                  [ -z "$AWS_REGION" ] && missing+=("AWS_REGION")
+                  [ -z "$AWS_ECR_REPOSITORY" ] && missing+=("AWS_ECR_REPOSITORY")
+                  if [ ${#missing[@]} -gt 0 ]; then
+                      echo "::error::Missing required secrets: ${missing[*]}"
+                      exit 1
+                  fi
+
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Derive version tag
+              run: |
+                  GIT_TAG="${{ github.ref_name }}"
+                  VERSION_TAG="${GIT_TAG#v}"
+                  echo "GIT_TAG=$GIT_TAG" >> "$GITHUB_ENV"
+                  echo "VERSION_TAG=$VERSION_TAG" >> "$GITHUB_ENV"
+
+            - name: Configure AWS credentials
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ secrets.AWS_REGION }}
+
+            - name: Login to Amazon ECR
+              id: ecr-login
+              uses: aws-actions/amazon-ecr-login@v2
+
+            - name: Build Docker image
+              env:
+                  ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+                  ECR_REPO: ${{ secrets.AWS_ECR_REPOSITORY }}
+              run: |
+                  IMAGE_BASE="$ECR_REGISTRY/$ECR_REPO"
+                  docker build \
+                      --file Dockerfile.server \
+                      --tag "$IMAGE_BASE:$VERSION_TAG" \
+                      --tag "$IMAGE_BASE:latest" \
+                      --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+                      --label "org.opencontainers.image.revision=${{ github.sha }}" \
+                      --label "org.opencontainers.image.version=$VERSION_TAG" \
+                      .
+                  echo "IMAGE_BASE=$IMAGE_BASE" >> "$GITHUB_ENV"
+
+            - name: Push Docker image to ECR
+              run: |
+                  docker push "$IMAGE_BASE:$VERSION_TAG"
+                  docker push "$IMAGE_BASE:latest"
+
+            - name: Write step summary
+              run: |
+                  echo "## Server Image Pushed to ECR" >> "$GITHUB_STEP_SUMMARY"
+                  echo "" >> "$GITHUB_STEP_SUMMARY"
+                  echo "| Tag | URI |" >> "$GITHUB_STEP_SUMMARY"
+                  echo "|-----|-----|" >> "$GITHUB_STEP_SUMMARY"
+                  echo "| \`$VERSION_TAG\` | \`$IMAGE_BASE:$VERSION_TAG\` |" >> "$GITHUB_STEP_SUMMARY"
+                  echo "| \`latest\` | \`$IMAGE_BASE:latest\` |" >> "$GITHUB_STEP_SUMMARY"
